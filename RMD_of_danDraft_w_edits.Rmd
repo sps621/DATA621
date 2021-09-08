@@ -1,0 +1,331 @@
+---
+title: "draft_edit_jw"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+
+```{r,  message=FALSE}
+#LIBRARIES FIGURE OUT WHICH I ACTUALLY NEED LATER
+library(tidyverse)
+library(GGally)
+library(psych)
+library(stats)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(normalr)
+library(GGally)
+library(visdat)
+library(corrplot)
+```
+
+
+# Data
+
+```{r}
+raw <- read.csv("./data/moneyball-training-data.csv")
+#deselect index
+raw<-raw%>%select(-INDEX)
+```
+
+
+# Initial Observations and Tidying
+
+First lets look at the summary of the variables to get a feel for the data
+
+```{r}
+summary(raw)
+```
+
+From summary, we can see that some variables show a potentially large number of missing values, especially `TEAM_BATTING_HBP` and `TEAM_BASERUN_CS`. Some variables show suspicious outliers, such as `TEAM_PITCHING_H`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_SO`, and `TEAM_FIELDING_E`.
+
+Also from summary, we can see that some variables contain entries of zero that don't make sense in the context of a baseball season. These variables include `TARGET_WINS`, `TEAM_BATTING_3B`, `TEAM_BATTING_HR`, `TEAM_BATTING_BB`, `TEAM_BATTING_SO`, `TEAM_BASERUN_SB`, `TEAM_BASERUN_CS`, `TEAM_PITCHING_HR`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_SO`. At least some of these entries we know to be erroneous. For example, the all-time minimum batting strikeouts for a team over a complete season was 308, achieved by the 1921 Cincinnati Reds (https://www.baseball-almanac.com/recbooks/rb_strike2.shtml).
+
+Investigating NAs more closely:
+
+```{r}
+visdat::vis_miss(raw, sort_miss = TRUE)
+```
+
+TEAM_BATTING_HBP` is comprised of almost 92% missing values. This variable cannot provide much information to our model. `TEAM_BASERUN`CS` also displays a very high fraction of missing values, at 34%.
+
+We will drop `TEAM_BATTING_HBP` due to incompleteness.
+
+```{r}
+raw<-raw%>%select(-TEAM_BATTING_HBP)
+```
+
+
+Examining the shape and spread of each variable:
+
+```{r, results='hide',fig.keep='all'}
+raw %>%
+  gather() %>%
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_density()
+
+
+```
+
+
+
+Density plots for each variable reveals the highly skewed shapes of `TEAM_FIELDING_E`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_H`, AND `TEAM_PITCHING_SO` as suggested by the numeric summary above. `TEAM_BASERUN_SB` and `TEAM_BATTING_3B` display moderate skewness. Other distributions appear roughly normal or bimodal. Let's look more closely at each of the highly skewed variables with a shapiro wilk normality test:
+
+
+```{r}
+shap<-lapply(raw,shapiro.test)
+res <- sapply(shap, `[`, c("statistic","p.value"))
+res
+```
+
+as you can see from the p-values of the Shapiro Wilk test. No variable is over alpha=.05, therefore none qualify as normally distributed. We will correct this after we are done creating new variables as to not disturb some correlations.
+
+
+We're also interested in uncovering any correlations between variables, since these could impact the performance of a linear model. 
+
+```{r}
+raw<-raw%>%na.omit()
+correlation <- cor(raw)
+corrplot.mixed(correlation, tl.col = 'black', tl.pos = 'lt')
+```
+
+we see that no variable , other than some of the batting variables, has correlation greater than 0.2 in either direction with the target. And we also see that some pairs of variables have correlations that are so strong or misdirected that we have reason to doubt the integrity of the data. Note that `TEAM_PITCHING_HR` and `TEAM_BATTING_HR` contain essentially the same data. [And `TEAM_BATTING_SO` and `TEAM_PITCHING_SO` are Jack's basis for grouping.]
+
+## Interpreting Correlation
+
+An unexpected and concerning finding in our exploration is that the variables `TEAM_BATTING_SO` and `TEAM_PITCHING_SO` segment into groups, three of which of which exhibits a very high correlation.
+
+
+
+```{r}
+
+raw %>%
+  mutate(SO_factor = case_when(TEAM_BATTING_SO >= TEAM_PITCHING_SO*.96+10~ 'high',
+                              (TEAM_BATTING_SO<TEAM_PITCHING_SO*.96+10 & TEAM_BATTING_SO>TEAM_PITCHING_SO*.96-50) ~'med_high',
+                              (TEAM_BATTING_SO<TEAM_PITCHING_SO*.96-50 & TEAM_BATTING_SO>TEAM_PITCHING_SO*.96-120) ~'med_low',
+                              TEAM_BATTING_SO<TEAM_PITCHING_SO*.96-120 ~'low')) %>%
+  filter(TEAM_PITCHING_SO < 2000) %>%
+  ggplot(aes(x = TEAM_PITCHING_SO, y = TEAM_BATTING_SO, colour = SO_factor)) +
+  geom_point()
+
+```
+
+There is no theoretical reason to expect such high correlations between the number of strikeouts a team incurs while batting, and the number of strikeouts a team achieves while pitching. However, it may be useful to divide the data into the four groups suggested by these relationships for purposes of analysis.
+
+
+!INSERT ANCOVA ANALYSIS HERE TO PROVE THAT THESE ARE GROUPS!
+
+
+
+This segmentation of the data will allow us to normalize the data to a much higher degree of efficiency, as will be shown later. 
+
+
+#  Tidying and Creating variables
+
+Our exploration of the data suggests the following transformations:
+
+```{r}
+names(raw) <- gsub('TEAM_', '', x = names(raw))
+```
+
+
+Add variables based on groupings of `TEAM_BATTING_SO` AND `TEAM_PITCHING_SO`
+
+```{r}
+raw <- raw %>% mutate(SO_factor = case_when(BATTING_SO >= PITCHING_SO*.96+10 ~ 'high',
+                                           (BATTING_SO<PITCHING_SO*.96+10 & BATTING_SO>PITCHING_SO*.96-50) ~'med_high',
+                                           (BATTING_SO<PITCHING_SO*.96-50 & BATTING_SO>PITCHING_SO*.96-120) ~'med_low',
+                                           BATTING_SO<PITCHING_SO*.96-120 ~'low'))
+```
+
+Construct new variables to reduce the number of pairs of correlated variables :
+
+```{r}
+raw <- raw %>%
+  mutate("BASERUN_NET_SB" = BASERUN_SB - BASERUN_CS) %>%
+  mutate("OFFENSE_OBP" = (BATTING_H + BATTING_BB)/(BATTING_H + BATTING_BB  + (162*27))) %>%
+  mutate("DEFENSE_OBP" = (PITCHING_H  + PITCHING_BB )/(PITCHING_H  + PITCHING_BB  + (162*27))) %>%
+  mutate("TOT_AT_BATS" = BATTING_H + BATTING_BB - BASERUN_CS + (162*27))
+
+```
+
+
+```{r}
+raw <- raw %>%
+  select(-c(BASERUN_SB,
+            BASERUN_CS,
+            BATTING_H,
+            BATTING_BB,
+            PITCHING_H,
+            PITCHING_BB,
+            )
+  )
+```
+
+
+Still have to drop one of {BAT_HR, PITCH_HR}, {BAT_SO, PITCH_SO}, {OFFENSE_OBP, TOT_AT_BAT}
+
+```{r}
+#raw<-raw%>%na.omit()
+pruned <- raw %>%
+  select(-c(BATTING_HR,
+            BATTING_SO,
+            TOT_AT_BATS))
+```
+
+dropping rows with NA
+```{r}
+raw<-raw%>%na.omit()
+```
+
+Note the correlation between `OFFENSE_OBP` and `DEFENSE_OBP`
+
+```{r}
+ggplot(raw,aes(x=OFFENSE_OBP,y=DEFENSE_OBP))+geom_point()
+pruned<-pruned%>% relocate(SO_factor, .after = last_col())
+```
+There seems to be highly linear correlation with the same spread as the one we found in `PITCHING_SO` and `BATTING_SO`, which bodes well for our theory on multiple groups in the data. 
+
+# Modeling
+
+As a first step, we will make conduct a linear regression on all of our variables and examine the results.
+```{r}
+#normalizing data as a requirement for linear regression
+
+
+lambdas<-getLambda(pruned[-11])
+dat<-normaliseData(pruned[-11],lambdas)
+lm1 <- lm(TARGET_WINS ~ ., data = dat)
+summary(lm1)
+```
+Looking at the estimates of our predictors. `OFFENSE_OBP` is the highest, meaning it is the main driver. And while all other estimates are low, their p-values are also below our alpha, so I see no need to take them out yet. 
+
+One other note is that our only non-significant predictor is `DEFENSE_OBP`, due to its colinearity with `OFFENSE_OBP` but I will leave it in to see if the group differences will make an impact later. 
+
+```{r}
+plot(lm1)
+```
+
+Above are the residual and QQ plots for our first linear model. In general our residuals !HOW DO YOU TALK ABOUT THE RESIDUALS THE RIGHT WAY!
+
+
+Now we will examine the groups we identified in our `BATTING_SO` vs `PITCHING_SO` plot by first looking at the pair plot
+
+```{r}
+ggpairs(data=pruned,mapping=ggplot2::aes(colour = SO_factor, alpha=.2))
+```
+!MAKE THIS IMAGE MORE HIGH RES OR ATTACH A LARGER VERSION!
+
+As you can see, these groups travel across variables
+
+If you look at `TARGET_WINS` vs `DEFENSE_OBP` (our most impactful variable from the general model). You can see that while all follow a similar slope, the intercept with `TARGET_WINS` seems to be different. If this is true, than using seperate models depending on the strikeout plot could increase our performance
+
+```{r}
+ggplot(pruned, aes(x=DEFENSE_OBP,y=TARGET_WINS, color=SO_factor))+geom_point()
+```
+
+
+#Generating Grouped models
+
+```{r}
+
+low <- pruned %>%
+  filter(SO_factor == 'low') %>%
+  select(-SO_factor)
+lambdas<-getLambda(low)
+nlow<-normaliseData(low,lambdas)
+
+med_low <- pruned %>%
+  filter(SO_factor == "med_low") %>%
+  select(-SO_factor)
+lambdas<-getLambda(med_low)
+nml<-normaliseData(med_low,lambdas)
+med_high <- pruned %>%
+  filter(SO_factor == "med_high") %>%
+  select(-SO_factor)
+lambdas<-getLambda(med_high)
+nmh<-normaliseData(med_high,lambdas)
+high <- pruned %>%
+  filter(SO_factor == "high") %>%
+  select(-SO_factor)
+lambdas<-getLambda(high)
+nhigh<-normaliseData(high,lambdas)
+```
+
+## high model
+```{r}
+lm_high <- lm(TARGET_WINS ~ ., data = high)
+summary(lm_high)
+```
+## combined medium model
+
+```{r}
+tmp <- pruned %>%
+  mutate("two_lev" = ifelse(SO_factor %in% c("low", "med_low"), 1, 0)) %>%
+  select(-SO_factor)
+tmp_lm <- lm(TARGET_WINS ~ ., data = tmp)
+summary(tmp_lm)
+```
+
+Note that the R^2 values are in the ballpark of our general model, but the intercepts are quite different. This might allow us to predict `TARGET_WINS` by grouping, because there is a significant difference in the baseline of wins depending on which group they are a part of. 
+
+
+# models
+
+
+```{r}
+lm_low <- lm(TARGET_WINS ~ ., data = low)
+lm_med_low <- lm(TARGET_WINS ~ ., data = med_low)
+lm_med_high <- lm(TARGET_WINS ~ ., data = med_high)
+lm_high <- lm(TARGET_WINS ~ ., data = high)
+
+summary(lm_low)
+summary(lm_med_low)
+summary(lm_med_high)
+summary(lm_high)
+```
+
+
+Also note that there are slight differences in significance of variables between the models. We could select different variables for each group for an extra layer of optimization. 
+
+
+# Backwards Feature Selection
+
+With backwards selection, we remove the highest p-value and rerun the model until all features are significant, or we decrease the model's complexity to a desired threshold. I will choose to optimize for R^2.
+
+# high model
+
+```{r}
+nhigh<-nhigh%>%
+  select(-OFFENSE_OBP)
+lm_high <- lm(TARGET_WINS ~ ., data = nhigh)
+summary(lm_high)
+```
+
+# combined middle model
+
+```{r}
+tmp<-tmp%>%
+  select(-OFFENSE_OBP)
+lm_high <- lm(TARGET_WINS ~ ., data =tmp)
+summary(lm_high)
+```
+
+# low model
+
+```{r}
+nlow<-nlow%>%
+  select(TARGET_WINS,FIELDING_DP,FIELDING_E,DEFENSE_OBP)
+lm_low <- lm(TARGET_WINS ~ ., data = nlow)
+summary(lm_low)
+```
+
