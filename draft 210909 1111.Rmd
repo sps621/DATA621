@@ -1,0 +1,415 @@
+---
+title: "DATA 621 HW 1"
+author: "Daniel Moscoe"
+date: "9/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is a draft showing the techniques and plots that I plan to include in a final report. You can provide feedback during our meeting, or you can fork [this repo](https://github.com/dmoscoe/DATA621), edit, and create a pull request. If you decide to do that, please ELI5 your code to me with comments. (Explain it like I'm five.) After our meeting I will turn this into a narrative report.
+
+```{r}
+library(tidyverse)
+library(GGally)
+library(psych)
+library(stats)
+library(corrplot)
+
+set.seed(210904)
+
+raw <- read.csv("C:/Users/dmosc/OneDrive/Documents/academic/CUNY SPS/DATA621/HW1/moneyball-training-data.csv")
+```
+
+### Data Exploration
+
+```{r}
+summary(raw)
+```
+
+Here we can see that some variables show a significant number of missing values, especially `TEAM_BATTING_HBP` and `TEAM_BASERUN_CS`. Some variables show suspiciously large maximum values, such as `TEAM_PITCHING_H`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_SO`, and `TEAM_FIELDING_E`. We can also see that some variables contain entries of zero that don't make sense in the context of a baseball season. These variables include `TARGET_WINS`, `TEAM_BATTING_3B`, `TEAM_BATTING_HR`, `TEAM_BATTING_BB`, `TEAM_BATTING_SO`, `TEAM_BASERUN_SB`, `TEAM_BASERUN_CS`, `TEAM_PITCHING_HR`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_SO`. At least some of these entries we know to be erroneous. For example, the [all-time minimum](https://www.baseball-almanac.com/recbooks/rb_strike2.shtml) batting strikeouts for a team over a complete season was 308, achieved by the 1921 Cincinnati Reds.  
+
+Investigating NAs more closely:
+
+```{r}
+colMeans(is.na(raw))
+```
+
+`TEAM_BATTING_HBP` is comprised of almost 92% missing values. This variable cannot provide much information to our model. `TEAM_BASERUN`CS` also displays a very high fraction of missing values: 34%.  
+
+Our findings so far mean that we will need a strategy to mitigate the impact of potentially erroneous outliers, and we will need to respond to the missingness in the data set.  
+
+Examining the shape of each variable:  
+
+```{r}
+raw %>%
+  gather() %>%
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_density()
+```
+
+Density plots for each variable reveals the highly skewed shapes of `TEAM_FIELDING_E`, `TEAM_PITCHING_BB`, `TEAM_PITCHING_H`, AND `TEAM_PITCHING_SO` as suggested by the numeric summary above. `TEAM_BASERUN_SB` and `TEAM_BATTING_3B` display moderate skewness. Other distributions appear roughly normal or bimodal. Let's look more closely at each of the highly skewed variables:  
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_FIELDING_E)) +
+  geom_histogram()
+```
+
+A very small number of entries exceed 1000. Excluding these, the distribution is moderately skewed right.  
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_PITCHING_BB)) +
+  geom_histogram()
+```
+
+The distribution appears normal except for a very small number of entries greater than 1000.  
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_PITCHING_H)) +
+  geom_histogram()
+```
+
+Let's look more closely at the region where most of this variable's values lie, [0,6000]:
+
+```{r}
+raw %>%
+  filter(TEAM_PITCHING_H < 6000) %>%
+  ggplot(aes(x = TEAM_PITCHING_H)) +
+  geom_histogram()
+```
+
+The variable is skewed even within this narrower region surrounding the peak. This suggests possible data entry error for values greater than 3250.
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_PITCHING_SO)) +
+  geom_histogram()
+```
+
+Narrowing in:
+
+```{r}
+raw %>%
+  filter(TEAM_PITCHING_SO < 2500) %>%
+  ggplot(aes(x = TEAM_PITCHING_SO)) +
+  geom_histogram()
+```
+
+The data appear roughly normal, except for a significant number of unrealistic zero-values. This suggests possible data entry error for values of zero, or greater than or equal to 2000.
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_BASERUN_SB)) +
+  geom_histogram()
+```
+
+The shape of this data does not suggest any data entry errors, even though there exist a few extreme outliers.
+
+```{r}
+ggplot(data = raw, aes(x = TEAM_BATTING_3B)) +
+  geom_histogram()
+```
+
+The shape of this data does not suggest any data entry errors, even though there exist a few extreme outliers.
+
+The Shapiro-Wilk (S-W) test is a hypothesis test with a null hypothesis that a given data set is normally distributed. While linear regression does not require any variable to be normally distributed, the non-normality of explanatory variables is sometimes linked to non-normally distributed residuals. Since interpretations of linear models are premised on normally distributed residuals, the results of the S-W test could be useful in revising models later on.
+
+###
+```{r}
+#THESE RESULTS DON'T MAKE SENSE. E.G., TARGET_WINS APPEARS VERY NEARLY NORMAL.
+shap <- lapply(raw, shapiro.test)
+res <- sapply(shap, `[`, c("statistic", "p.value"))
+res
+```
+
+The p-value for every variable (except TEAMA_BATTING_HBP, which will be dropped) is near zero. Therefore none of the variables can be considered normally distributed. 
+###
+
+An important condition of linear modeling is that variables be uncorrelated with each other. In real-world data, it is rarely possible to fully satisfy this condition. However, we can seek to avoid large pairwise correlations between variables.  
+
+The correlation plot below is arranged so that all variables with a theoretical positive effect on `TARGET_WINS` appear first, followed by variables with a theoretical negative effect. We would expect positive correlations among variables with positive effects, positive correlations among variables with negative effects, and negative correlations among variables with opposite effects.  
+
+```{r}
+#reorder based on variable list on assignment sheet. Drop TEAM_BATTING_HBP and TEAM_BASERUN_CS due to missingness.
+tmp <- raw[,c(2:7,9,17,15,8,16,14,12,13)]
+correlation <- cor(tmp, use = "complete.obs")
+corrplot.mixed(correlation, tl.col = 'black', tl.pos = 'lt')
+```
+
+But this is not what we see. Instead we see that no variable alone, has correlation greater than 0.35 in either direction with the target. And we also see that some pairs of variables have correlations that are so strong or misdirected that we have reason to doubt the integrity of the data. Note that `TEAM_PITCHING_HR` and `TEAM_BATTING_HR`, with correlation 0.98, contain essentially the same data.  
+
+Another assumption of linear models is that explanatory variables are linearly related to the response variable. Let's examine this using scatterplots. First, we examine the batting variables:  
+
+```{r}
+raw %>%
+  gather(starts_with("TEAM_BAT"), key = "var", value = "value") %>%
+  ggplot(aes(x = value, y = TARGET_WINS)) +
+  geom_point() +
+  facet_wrap(~ var, scales = "free")
+```
+
+###
+What can we say about whether these explanatory variables are linearly related to TARGET_WINS? It doesn't seem like there's much of a relationship of any kind, either linear or nonlinear.
+###
+
+Examining `BASERUN` and `FIELDING` variables:
+
+```{r}
+raw %>%
+  gather(c(starts_with("TEAM_BASERUN"), starts_with("TEAM_FIELD")), key = "var", value = "value") %>%
+  ggplot(aes(x = value, y = TARGET_WINS)) +
+  geom_point() +
+  facet_wrap(~ var, scales = "free")
+```
+
+###
+What can we say about these?
+###
+
+Examining `PITCHING` variables:  
+
+```{r}
+raw %>%
+  gather(starts_with("TEAM_PITCH"), key = "var", value = "value") %>%
+  ggplot(aes(x = value, y = TARGET_WINS)) +
+  geom_point() +
+  facet_wrap(~ var, scales = "free")
+```
+
+###
+Gross.
+###
+
+An unexpected finding in our exploratory data analysis is that a scatterplot of `TEAM_BATTING_SO` and `TEAM_PITCHING_SO` suggests that the data can be divided into 4 distinct groups, three of which contain highly correlated data:
+
+```{r}
+raw %>%
+  mutate(SO_factor = case_when(TEAM_BATTING_SO >= TEAM_PITCHING_SO*.96+10~ 'high',
+                              (TEAM_BATTING_SO<TEAM_PITCHING_SO*.96+10 & TEAM_BATTING_SO>TEAM_PITCHING_SO*.96-50) ~'med_high',
+                              (TEAM_BATTING_SO<TEAM_PITCHING_SO*.96-50 & TEAM_BATTING_SO>TEAM_PITCHING_SO*.96-120) ~'med_low',
+                              TEAM_BATTING_SO<TEAM_PITCHING_SO*.96-120 ~'low')) %>%
+  filter(TEAM_PITCHING_SO < 2000) %>%
+  ggplot(aes(x = TEAM_PITCHING_SO, y = TEAM_BATTING_SO, colour = SO_factor)) +
+  geom_point()
+```
+
+There is no theoretical reason to expect such a grouping, or to expect such high correlations between the number of strikeouts a team incurs while batting, and the number of strikeouts a team achieves while pitching. However, it may be useful to divide the data into the four groups suggested by these relationships for modeling purposes.  
+
+### Data Transformation
+
+Overall, our exploration of the data suggests the following transformations.  
+
+*Simplify column names*.
+
+```{r}
+names(raw) <- gsub('TEAM_', '', x = names(raw))
+```
+
+*Cap variables with extreme outliers*.
+
+```{r}
+raw$FIELDING_E[raw$FIELDING_E > 1000] <- 1000
+raw$PITCHING_BB[raw$PITCHING_BB > 1000] <- 1000
+raw$PITCHING_H[raw$PITCHING_H > 3250] <- 3250
+raw$PITCHING_SO[raw$PITCHING_SO > 2000] <- 2000
+```
+
+###
+Impute values using medians?
+###
+
+*Add group variable* `SO_FACTOR`.
+
+```{r}
+raw <- raw %>% mutate(SO_FACTOR = case_when(BATTING_SO >= PITCHING_SO*.96+10 ~ 'high',
+                                           (BATTING_SO<PITCHING_SO*.96+10 & BATTING_SO>PITCHING_SO*.96-50) ~ 'med_high',
+                                           (BATTING_SO<PITCHING_SO*.96-50 & BATTING_SO>PITCHING_SO*.96-120) ~ 'med_low',
+                                           BATTING_SO<PITCHING_SO*.96-120 ~ 'low'))
+```
+
+*Combine variables*.
+
+Here we construct new variables to reduce the number of pairs of correlated variables, and to better account for the structure of a baseball season.
+
+```{r}
+raw <- raw %>%
+  mutate("BASERUN_NET_SB" = BASERUN_SB - BASERUN_CS) %>%
+  mutate("OFFENSE_OBP" = (BATTING_H + BATTING_BB)/(BATTING_H + BATTING_BB - BASERUN_CS + (162*27))) %>%
+  mutate("DEFENSE_OBP" = (PITCHING_H + FIELDING_E + PITCHING_BB - FIELDING_DP)/(PITCHING_H + FIELDING_E + PITCHING_BB - FIELDING_DP + (162*27))) %>%
+  mutate("TOT_AT_BATS" = BATTING_H + BATTING_BB - BASERUN_CS + (162*27))
+```
+
+*Drop unneeded columns and move response to final column*.
+
+```{r}
+raw <- raw[,c(4:6,8,13,15,18:22,2)]
+```
+
+*Train/test split*.
+
+```{r}
+train_rows <- sample(nrow(raw), 0.80 * nrow(raw), replace = FALSE)
+train <- raw[train_rows,]
+test <- raw[-train_rows,]
+```
+
+###
+*Drop rows with missing values*.
+
+Here we drop rows with missing values from the training set. However, for the test set, we impute missing values with the median. That's because future data submitted to our model will likely also contain missing values, and we need some strategy to conform data with missingness to the requirements of our model. In order to judge our model's likely performance in the future, we need a test set as similar to future data as possible. But we leave rows with missing values out of the training set, because these imputed values could add bias to a model.
+
+```{r}
+train <- drop_na(train)
+test <- test %>%
+  mutate_all(~ifelse(is.na(.), median(., na.rm = TRUE), .))
+```
+###
+
+We now have a training set and a test set that will enable us to build and test linear models on this data set.  
+
+### Modeling.
+
+```{r}
+rmse <- function(lm, test) {
+  preds <- predict(lm, test[,c(1:11)])
+  errors <- test$TARGET_WINS - preds
+  return(sqrt(sum(errors^2)/(nrow(test) - length(lm$coefficients) - 1)))
+}
+```
+
+
+*Model 1. Almost all variables*.
+
+This model contains all variables except `BATTING_HR`, `BATTING_SO`, and `TOT_AT_BATS`, because each of these variables is highly correlated with at least one other variable.
+
+```{r}
+lm1 <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + SO_FACTOR + BASERUN_NET_SB + OFFENSE_OBP + DEFENSE_OBP, data = train)
+summary(lm1)
+```
+
+
+```{r}
+plot(lm1)
+```
+
+###
+Interpret model and residual plots
+###
+
+How does this model perform on the holdout set?
+###
+```{r}
+#RMSE on test set for lm1:
+
+lm1_test_rmse <- rmse(lm1,test)
+```
+###
+
+The scatterplot of `TEAM_BATTING_SO` vs `TEAM+PITCHING_SO` suggested four groups in this data. Here we fit one model to each group.  
+
+```{r}
+low <- train %>%
+  filter(SO_FACTOR == "low") %>%
+  select(-SO_FACTOR)
+
+med_low <- train %>%
+  filter(SO_FACTOR == "med_low") %>%
+  select(-SO_FACTOR)
+
+med_high <- train %>%
+  filter(SO_FACTOR == "med_high") %>%
+  select(-SO_FACTOR)
+
+high <- train %>%
+  filter(SO_FACTOR == "high") %>%
+  select(-SO_FACTOR)
+
+lm_low <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + BASERUN_NET_SB + OFFENSE_OBP + DEFENSE_OBP, data = low)
+lm_med_low <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + BASERUN_NET_SB + OFFENSE_OBP + DEFENSE_OBP, data = med_low)
+lm_med_high <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + BASERUN_NET_SB + OFFENSE_OBP + DEFENSE_OBP, data = med_high)
+lm_high <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + BASERUN_NET_SB + OFFENSE_OBP + DEFENSE_OBP, data = high)
+
+summary(lm_low)
+summary(lm_med_low)
+summary(lm_med_high)
+summary(lm_high)
+```
+
+```{r}
+plot(lm_low)
+plot(lm_med_low)
+plot(lm_med_high)
+plot(lm_high)
+```
+
+###
+Interpret model and residual plots
+###
+
+How does this model perform on the holdout set?
+###
+```{r}
+testlow <- test %>%
+  filter(SO_FACTOR == "low") %>%
+  select(-SO_FACTOR)
+
+testmed_low <- test %>%
+  filter(SO_FACTOR == "med_low") %>%
+  select(-SO_FACTOR)
+
+testmed_high <- test %>%
+  filter(SO_FACTOR == "med_high") %>%
+  select(-SO_FACTOR)
+
+testhigh <- test %>%
+  filter(SO_FACTOR == "high") %>%
+  select(-SO_FACTOR)
+
+rmse_low <- rmse(lm_low,testlow)
+rmse_med_low <- rmse(lm_med_low,testmed_low)
+rmse_med_high <- rmse(lm_med_high,testmed_high)
+rmse_high <- rmse(lm_high,testhigh)
+
+#Overall RMSE:
+rmse_total <- (rmse_low * nrow(testlow) + rmse_med_low * nrow(testmed_low) + rmse_med_high * nrow(testmed_high) + rmse_high * nrow(testhigh)) / nrow(test)
+
+```
+
+###
+
+In this third model, we drop `DEFENSE_OBP` from `lm1`. Even though this variable is a statistically significant predictor of `TARGET_WINS`, its large coefficient and standard error compared to the other variables suggest it may be correlated with another variable. In fact, it has a correlation coefficient of ###VALUE### with `OFFENSE_OBP`.
+
+```{r}
+cor(train$OFFENSE_OBP, train$DEFENSE_OBP)
+```
+
+```{r}
+lm3 <- lm(TARGET_WINS ~ BATTING_2B + BATTING_3B + PITCHING_HR + PITCHING_SO + SO_FACTOR + BASERUN_NET_SB + OFFENSE_OBP, data = train)
+summary(lm3)
+```
+
+Removing this variable reduced the standard error for `OFFENSE_OBP`.
+
+###
+Interpret model and residual plots
+###
+
+How does this model perform on the holdout set?
+###
+```{r}
+lm3_test_rmse <- rmse(lm3,test)
+```
+*Summary of model performance (RMSE)*
+
+```{r}
+print(lm1_test_rmse)
+print(rmse_total)
+print(lm3_test_rmse)
+```
+
+### Model Selection
+
+###
+Best model based on RMSE is lm3.
+###
